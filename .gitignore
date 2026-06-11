@@ -1,0 +1,14 @@
+.DS_Store
+
+# Xcode user-specific data
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+
+# Build artifacts
+DerivedData/
+build/
+
+# Swift Package Manager
+.build/
+
