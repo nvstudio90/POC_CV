@@ -17,6 +17,8 @@
 		8FA82A762FDABB6000DF3407 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8FA82A752FDABB6000DF3407 /* QuartzCore.framework */; };
 		8FA82A782FDABB6500DF3407 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8FA82A772FDABB6500DF3407 /* UIKit.framework */; };
 		8FA82A7A2FDABB6D00DF3407 /* ImageIO.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8FA82A792FDABB6D00DF3407 /* ImageIO.framework */; };
+		8FA82A7C2FDCC10000DF3407 /* POC_CVDependencies in Frameworks */ = {isa = PBXBuildFile; productRef = 8FA82A7B2FDCC10000DF3407 /* POC_CVDependencies */; };
+		8FA82CB92FDBC3EA00DF3407 /* POC_CVDependencies in Frameworks */ = {isa = PBXBuildFile; productRef = 8FA82CB82FDBC3EA00DF3407 /* POC_CVDependencies */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -59,6 +61,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8FA82A7C2FDCC10000DF3407 /* POC_CVDependencies in Frameworks */,
 				8FA82A7A2FDABB6D00DF3407 /* ImageIO.framework in Frameworks */,
 				8FA82A782FDABB6500DF3407 /* UIKit.framework in Frameworks */,
 				8FA82A762FDABB6000DF3407 /* QuartzCore.framework in Frameworks */,
@@ -69,6 +72,7 @@
 				8FA82A6C2FDABB2E00DF3407 /* AVFoundation.framework in Frameworks */,
 				8FA82A6A2FDABB2200DF3407 /* Accelerate.framework in Frameworks */,
 				8FA82A682FDABA7500DF3407 /* libopencv_ios_minimal.a in Frameworks */,
+				8FA82CB92FDBC3EA00DF3407 /* POC_CVDependencies in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -129,6 +133,8 @@
 			);
 			name = POC_CV;
 			packageProductDependencies = (
+				8FA82A7B2FDCC10000DF3407 /* POC_CVDependencies */,
+				8FA82CB82FDBC3EA00DF3407 /* POC_CVDependencies */,
 			);
 			productName = POC_CV;
 			productReference = 8F9E973E2FDA6C2A00D25299 /* POC_CV.app */;
@@ -158,6 +164,9 @@
 			);
 			mainGroup = 8F9E97352FDA6C2A00D25299;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				8FA82CB72FDBC3EA00DF3407 /* XCLocalSwiftPackageReference "Dependencies" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8F9E973F2FDA6C2A00D25299 /* Products */;
 			projectDirPath = "";
@@ -194,9 +203,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = V5TR223894;
+				DEVELOPMENT_TEAM = ZQ24627M6Z;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = POC_CV/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -204,13 +214,15 @@
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.nvs.POC-CV";
+				PRODUCT_BUNDLE_IDENTIFIER = com.one.oned.tcbsaleapp.qc;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -226,9 +238,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = V5TR223894;
+				DEVELOPMENT_TEAM = ZQ24627M6Z;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = POC_CV/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -236,13 +249,15 @@
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.nvs.POC-CV";
+				PRODUCT_BUNDLE_IDENTIFIER = com.one.oned.tcbsaleapp.qc;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -406,6 +421,24 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		8FA82CB72FDBC3EA00DF3407 /* XCLocalSwiftPackageReference "Dependencies" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Dependencies;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8FA82A7B2FDCC10000DF3407 /* POC_CVDependencies */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = POC_CVDependencies;
+		};
+		8FA82CB82FDBC3EA00DF3407 /* POC_CVDependencies */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = POC_CVDependencies;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8F9E97362FDA6C2A00D25299 /* Project object */;
 }

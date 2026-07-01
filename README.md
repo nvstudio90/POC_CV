@@ -142,3 +142,17 @@ Recommended next steps for scaling this base:
 - Navigation is coordinator-driven
 - Flow cleanup is handled through router callbacks
 - The current implementation is intentionally small to keep the base easy to evolve
+
+## Swift Package Manager
+
+The repository now includes a dedicated [`Dependencies/Package.swift`](/Users/om/Projects/POC_CV/Dependencies/Package.swift) manifest as the manual entry point for Swift Package Manager dependency declarations.
+
+- Add remote packages in the `dependencies` array
+- Map package products in the `POC_CVDependencies` target dependencies
+- Keep the existing `OpenCV` static library under `Vendor/OpenCV` linked manually for now, because the current artifact is not packaged as an `.xcframework`
+
+Example:
+
+```swift
+.package(url: "https://github.com/Alamofire/Alamofire.git", from: "5.9.0")
+```
