@@ -22,10 +22,94 @@ final class FrameRenderView: UIView {
     }
 }
 
+final class LicensePlateOverlayView: UIView {
+    private var plates: [LicensePlateInfo] = []
+    private var imageSize: CGSize = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(plates: [LicensePlateInfo]) {
+        self.plates = plates
+        setNeedsDisplay()
+    }
+
+    func updateImageSize(_ imageSize: CGSize) {
+        self.imageSize = imageSize
+        setNeedsDisplay()
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard imageSize.width > 0, imageSize.height > 0, let context = UIGraphicsGetCurrentContext() else {
+            return
+        }
+
+        let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let renderedImageSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let renderedImageRect = CGRect(
+            x: (bounds.width - renderedImageSize.width) / 2,
+            y: (bounds.height - renderedImageSize.height) / 2,
+            width: renderedImageSize.width,
+            height: renderedImageSize.height
+        )
+
+        context.setLineWidth(2)
+        context.setStrokeColor(UIColor.systemYellow.cgColor)
+        context.setFillColor(UIColor.systemYellow.withAlphaComponent(0.18).cgColor)
+
+        for plate in plates {
+            let displayRect = CGRect(
+                x: renderedImageRect.minX + plate.rect.minX * scale,
+                y: renderedImageRect.minY + plate.rect.minY * scale,
+                width: plate.rect.width * scale,
+                height: plate.rect.height * scale
+            )
+
+            context.fill(displayRect)
+            context.stroke(displayRect)
+            drawLabel(for: plate, in: displayRect)
+        }
+    }
+
+    private func drawLabel(for plate: LicensePlateInfo, in rect: CGRect) {
+        let labelText = plate.text?.isEmpty == false
+            ? plate.text ?? ""
+            : String(format: "%.0f%%", plate.confidence * 100)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: UIColor.black
+        ]
+        let textSize = labelText.size(withAttributes: attributes)
+        let labelRect = CGRect(
+            x: rect.minX,
+            y: max(rect.minY - textSize.height - 6, 0),
+            width: textSize.width + 8,
+            height: textSize.height + 4
+        )
+
+        UIColor.systemYellow.setFill()
+        UIBezierPath(roundedRect: labelRect, cornerRadius: 4).fill()
+        labelText.draw(
+            in: labelRect.insetBy(dx: 4, dy: 2),
+            withAttributes: attributes
+        )
+    }
+}
+
 final class HomeViewController: UIViewController {
     private let viewModel: HomeViewModelProtocol
     private let frameContainerView = UIView()
     private let frameRenderView = FrameRenderView()
+    private let licensePlateOverlayView = LicensePlateOverlayView()
     private let statusLabel = UILabel()
     private let controlsStackView = UIStackView()
     private let playPauseButton = UIButton(type: .system)
@@ -135,6 +219,7 @@ final class HomeViewController: UIViewController {
 
         view.addSubview(frameContainerView)
         frameContainerView.addSubview(frameRenderView)
+        frameContainerView.addSubview(licensePlateOverlayView)
         view.addSubview(controlsStackView)
         view.addSubview(timelineStackView)
         view.addSubview(fpsValueLabel)
@@ -149,6 +234,10 @@ final class HomeViewController: UIViewController {
         }
 
         frameRenderView.snp.makeConstraints { make in
+            make.edges.equalToSuperview()
+        }
+
+        licensePlateOverlayView.snp.makeConstraints { make in
             make.edges.equalToSuperview()
         }
 
@@ -186,6 +275,10 @@ final class HomeViewController: UIViewController {
             self?.render(frame: frame)
         }
 
+        viewModel.onLicensePlatesDetected = { [weak self] plates in
+            self?.licensePlateOverlayView.update(plates: plates)
+        }
+
         viewModel.onStatusChanged = { [weak self] message in
             self?.statusLabel.text = message
         }
@@ -206,6 +299,7 @@ final class HomeViewController: UIViewController {
 
     private func render(frame: HomeVideoFrame) {
         frameRenderView.render(frame)
+        licensePlateOverlayView.updateImageSize(CGSize(width: frame.cgImage.width, height: frame.cgImage.height))
         let aspectText = String(format: "%.0fx%.0f", frame.size.width, frame.size.height)
         navigationItem.prompt = "Aspect \(aspectText)"
     }

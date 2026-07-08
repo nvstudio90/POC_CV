@@ -20,6 +20,7 @@ enum HomePlaybackState {
 protocol HomeViewModelProtocol: AnyObject {
     var title: String { get }
     var onFrameReady: ((HomeVideoFrame) -> Void)? { get set }
+    var onLicensePlatesDetected: (([LicensePlateInfo]) -> Void)? { get set }
     var onStatusChanged: ((String) -> Void)? { get set }
     var onPlaybackStateChanged: ((HomePlaybackState) -> Void)? { get set }
     var onFPSChanged: ((Int) -> Void)? { get set }
@@ -39,6 +40,7 @@ final class HomeViewModel: HomeViewModelProtocol {
     let title = "Home"
 
     var onFrameReady: ((HomeVideoFrame) -> Void)?
+    var onLicensePlatesDetected: (([LicensePlateInfo]) -> Void)?
     var onStatusChanged: ((String) -> Void)?
     var onPlaybackStateChanged: ((HomePlaybackState) -> Void)?
     var onFPSChanged: ((Int) -> Void)?
@@ -46,8 +48,9 @@ final class HomeViewModel: HomeViewModelProtocol {
 
     private let stateQueue = DispatchQueue(label: "com.poccv.home.video.state", qos: .userInitiated)
     private let decodeQueue = DispatchQueue(label: "com.poccv.home.video.decode", qos: .userInitiated)
+    private let licensePlateDetector = LicensePlateDetector()
     private let ciContext = CIContext()
-    private let defaultFPS = 12
+    private let defaultFPS = 30
     private let minFPS = 1
     private let maxFPS = 60
     private let targetBufferSize = 18
@@ -68,6 +71,9 @@ final class HomeViewModel: HomeViewModelProtocol {
     private var hasPreparedVideo = false
     private var generation = 0
     private var isDecodeInFlight = false
+    private var isPlateDetectionInFlight = false
+    private var lastPlateDetectionTime = CMTime.negativeInfinity
+    private let plateDetectionInterval = CMTime(seconds: 0.15, preferredTimescale: 600)
 
     private var assetReader: AVAssetReader?
     private var trackOutput: AVAssetReaderTrackOutput?
@@ -93,6 +99,8 @@ final class HomeViewModel: HomeViewModelProtocol {
             self.hasPreparedVideo = false
             self.generation += 1
             self.isDecodeInFlight = false
+            self.isPlateDetectionInFlight = false
+            self.lastPlateDetectionTime = .negativeInfinity
             self.isStopped = false
             self.stopTimerLocked()
             self.cancelReaderLocked()
@@ -101,6 +109,7 @@ final class HomeViewModel: HomeViewModelProtocol {
             self.currentTime = .zero
             self.playbackStartTime = .zero
             self.reachedEndOfVideo = false
+            self.emitLicensePlates([])
             self.emitTimeline(current: 0, duration: 0)
             self.setPlaybackState(.idle)
             self.notifyStatus("Video source updated.")
@@ -128,9 +137,12 @@ final class HomeViewModel: HomeViewModelProtocol {
         stateQueue.async { [weak self] in
             guard let self else { return }
             self.isStopped = true
+            self.generation += 1
             self.stopTimerLocked()
             self.cancelReaderLocked()
             self.frameBuffer.removeAll(keepingCapacity: true)
+            self.isPlateDetectionInFlight = false
+            self.emitLicensePlates([])
             self.setPlaybackState(.paused)
         }
     }
@@ -225,8 +237,11 @@ final class HomeViewModel: HomeViewModelProtocol {
         frameBuffer.removeAll(keepingCapacity: true)
         reachedEndOfVideo = false
         isDecodeInFlight = false
+        isPlateDetectionInFlight = false
+        lastPlateDetectionTime = .negativeInfinity
         playbackStartTime = normalizedTime(time)
         currentTime = playbackStartTime
+        emitLicensePlates([])
         emitTimeline(current: currentTime.seconds, duration: duration.seconds)
 
         do {
@@ -490,8 +505,43 @@ final class HomeViewModel: HomeViewModelProtocol {
         return CGSize(width: abs(transformedSize.width), height: abs(transformedSize.height))
     }
     private func emitFrame(_ frame: HomeVideoFrame) {
+        requestPlateDetectionLocked(for: frame, generation: generation)
+
         DispatchQueue.main.async { [weak self] in
             self?.onFrameReady?(frame)
+        }
+    }
+
+    private func requestPlateDetectionLocked(for frame: HomeVideoFrame, generation: Int) {
+//        guard isPlateDetectionInFlight == false else { return }
+//        if lastPlateDetectionTime.isNumeric, frame.timestamp - lastPlateDetectionTime < plateDetectionInterval {
+//            return
+//        }
+//
+//        isPlateDetectionInFlight = true
+//        lastPlateDetectionTime = frame.timestamp
+//
+//        licensePlateDetector.detectLicensePlates(in: frame) { [weak self] result in
+//            guard let self else { return }
+//            self.stateQueue.async { [weak self] in
+//                guard let self else { return }
+//                self.isPlateDetectionInFlight = false
+//                guard generation == self.generation else { return }
+//
+//                switch result {
+//                case .success(let plates):
+//                    self.emitLicensePlates(plates)
+//                case .failure(let error):
+//                    self.emitLicensePlates([])
+//                    self.notifyStatus("License plate detection failed: \(error.localizedDescription)")
+//                }
+//            }
+//        }
+    }
+
+    private func emitLicensePlates(_ plates: [LicensePlateInfo]) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onLicensePlatesDetected?(plates)
         }
     }
 
