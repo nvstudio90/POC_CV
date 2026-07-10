@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreImage
 import Foundation
+import QuartzCore
 
 struct HomeVideoFrame {
     let cgImage: CGImage
@@ -19,8 +20,9 @@ enum HomePlaybackState {
 
 protocol HomeViewModelProtocol: AnyObject {
     var title: String { get }
+    var onPlayerChanged: ((AVPlayer?) -> Void)? { get set }
     var onFrameReady: ((HomeVideoFrame) -> Void)? { get set }
-    var onLicensePlatesDetected: (([LicensePlateInfo]) -> Void)? { get set }
+    var onVehiclesUpdated: (([VehicleOverlayItem]) -> Void)? { get set }
     var onStatusChanged: ((String) -> Void)? { get set }
     var onPlaybackStateChanged: ((HomePlaybackState) -> Void)? { get set }
     var onFPSChanged: ((Int) -> Void)? { get set }
@@ -39,79 +41,68 @@ protocol HomeViewModelProtocol: AnyObject {
 final class HomeViewModel: HomeViewModelProtocol {
     let title = "Home"
 
+    var onPlayerChanged: ((AVPlayer?) -> Void)?
     var onFrameReady: ((HomeVideoFrame) -> Void)?
-    var onLicensePlatesDetected: (([LicensePlateInfo]) -> Void)?
+    var onVehiclesUpdated: (([VehicleOverlayItem]) -> Void)?
     var onStatusChanged: ((String) -> Void)?
     var onPlaybackStateChanged: ((HomePlaybackState) -> Void)?
     var onFPSChanged: ((Int) -> Void)?
     var onTimelineChanged: ((Double, Double) -> Void)?
 
     private let stateQueue = DispatchQueue(label: "com.poccv.home.video.state", qos: .userInitiated)
-    private let decodeQueue = DispatchQueue(label: "com.poccv.home.video.decode", qos: .userInitiated)
-    private let licensePlateDetector = LicensePlateDetector()
+    private let trackingEngine = TrackingEngine()
     private let ciContext = CIContext()
     private let defaultFPS = 30
     private let minFPS = 1
     private let maxFPS = 60
-    private let targetBufferSize = 18
-    private let refillThreshold = 6
     private let seekTolerance = CMTime(seconds: 0.05, preferredTimescale: 600)
 
     private var videoURL: URL?
     private var asset: AVURLAsset?
+    private var playerItem: AVPlayerItem?
+    private var player: AVPlayer?
+    private var videoOutput: AVPlayerItemVideoOutput?
     private var videoTrack: AVAssetTrack?
     private var displaySize = CGSize.zero
     private var preferredTransform = CGAffineTransform.identity
     private var duration = CMTime.zero
 
-    private var playbackTimer: DispatchSourceTimer?
+    private var analysisTimer: DispatchSourceTimer?
+    private var timelineObserver: Any?
+    private var didEndObserver: NSObjectProtocol?
     private var currentFPS = 12
     private var playbackState: HomePlaybackState = .idle
     private var isStopped = false
     private var hasPreparedVideo = false
     private var generation = 0
-    private var isDecodeInFlight = false
-    private var isPlateDetectionInFlight = false
-    private var lastPlateDetectionTime = CMTime.negativeInfinity
-    private let plateDetectionInterval = CMTime(seconds: 0.15, preferredTimescale: 600)
-
-    private var assetReader: AVAssetReader?
-    private var trackOutput: AVAssetReaderTrackOutput?
-    private var frameBuffer: [HomeVideoFrame] = []
-    private var lastRenderedFrame: HomeVideoFrame?
-    private var currentTime = CMTime.zero
-    private var playbackStartTime = CMTime.zero
     private var reachedEndOfVideo = false
 
     init() {
         currentFPS = defaultFPS
+        configureTrackingEngine()
+    }
+
+    private func configureTrackingEngine() {
+        // Overlay items arrive on the engine's tracking queue; forward to main.
+        trackingEngine.onOverlayItems = { [weak self] items in
+            self?.emitVehicles(items)
+        }
+        trackingEngine.onError = { [weak self] error in
+            self?.notifyStatus("Detection error: \(error.localizedDescription)")
+        }
+    }
+
+    deinit {
+        removeObserversLocked()
+        stopAnalysisTimerLocked()
+        player?.pause()
     }
 
     func setVideoURL(_ url: URL) {
         stateQueue.async { [weak self] in
             guard let self else { return }
+            self.resetPlaybackLocked()
             self.videoURL = url
-            self.asset = nil
-            self.videoTrack = nil
-            self.duration = .zero
-            self.displaySize = .zero
-            self.preferredTransform = .identity
-            self.hasPreparedVideo = false
-            self.generation += 1
-            self.isDecodeInFlight = false
-            self.isPlateDetectionInFlight = false
-            self.lastPlateDetectionTime = .negativeInfinity
-            self.isStopped = false
-            self.stopTimerLocked()
-            self.cancelReaderLocked()
-            self.frameBuffer.removeAll(keepingCapacity: true)
-            self.lastRenderedFrame = nil
-            self.currentTime = .zero
-            self.playbackStartTime = .zero
-            self.reachedEndOfVideo = false
-            self.emitLicensePlates([])
-            self.emitTimeline(current: 0, duration: 0)
-            self.setPlaybackState(.idle)
             self.notifyStatus("Video source updated.")
         }
     }
@@ -138,11 +129,10 @@ final class HomeViewModel: HomeViewModelProtocol {
             guard let self else { return }
             self.isStopped = true
             self.generation += 1
-            self.stopTimerLocked()
-            self.cancelReaderLocked()
-            self.frameBuffer.removeAll(keepingCapacity: true)
-            self.isPlateDetectionInFlight = false
-            self.emitLicensePlates([])
+            self.player?.pause()
+            self.stopAnalysisTimerLocked()
+            self.trackingEngine.reset()
+            self.emitVehicles([])
             self.setPlaybackState(.paused)
         }
     }
@@ -175,8 +165,8 @@ final class HomeViewModel: HomeViewModelProtocol {
             self.emitFPS(clampedFPS)
 
             if case .playing = self.playbackState {
-                self.startTimerLocked()
-                self.notifyStatus("Playing at \(clampedFPS) FPS.")
+                self.startAnalysisTimerLocked()
+                self.notifyStatus("Playing. Detecting up to \(clampedFPS) FPS.")
             }
         }
     }
@@ -204,100 +194,39 @@ final class HomeViewModel: HomeViewModelProtocol {
             return
         }
 
+        resetPlaybackLocked(keepingURL: true)
+
         let asset = AVURLAsset(url: videoURL)
         guard let videoTrack = asset.tracks(withMediaType: .video).first else {
             failLocked("The provided URL does not contain a video track.")
             return
         }
 
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ])
+        let item = AVPlayerItem(asset: asset)
+        item.add(output)
+
+        let player = AVPlayer(playerItem: item)
+        player.actionAtItemEnd = .pause
+
         self.asset = asset
+        self.playerItem = item
+        self.player = player
+        self.videoOutput = output
         self.videoTrack = videoTrack
         duration = asset.duration
         preferredTransform = videoTrack.preferredTransform
         displaySize = displaySize(for: videoTrack)
         hasPreparedVideo = true
-        currentTime = .zero
-        playbackStartTime = .zero
-        emitTimeline(current: 0, duration: duration.seconds)
-
-        seekLocked(to: .zero, autoplay: true)
-    }
-
-    private func seekLocked(to time: CMTime, autoplay: Bool) {
-        guard hasPreparedVideo else {
-            startStreaming()
-            return
-        }
-
-        generation += 1
-        let currentGeneration = generation
-        isStopped = false
-        stopTimerLocked()
-        cancelReaderLocked()
-        frameBuffer.removeAll(keepingCapacity: true)
         reachedEndOfVideo = false
-        isDecodeInFlight = false
-        isPlateDetectionInFlight = false
-        lastPlateDetectionTime = .negativeInfinity
-        playbackStartTime = normalizedTime(time)
-        currentTime = playbackStartTime
-        emitLicensePlates([])
-        emitTimeline(current: currentTime.seconds, duration: duration.seconds)
 
-        do {
-            try createReaderLocked(startingAt: playbackStartTime)
-            requestDecodeLocked(generation: currentGeneration, minimumCount: 1)
-
-            if autoplay {
-                setPlaybackState(.loading)
-                notifyStatus("Seeking and buffering...")
-                startTimerLocked()
-            } else {
-                setPlaybackState(.paused)
-                notifyStatus("Seeked to \(formatSeconds(currentTime.seconds)).")
-            }
-        } catch {
-            failLocked(error.localizedDescription)
-        }
-    }
-
-    private func createReaderLocked(startingAt time: CMTime) throws {
-        cancelReaderLocked()
-
-        guard let asset, let videoTrack else {
-            throw NSError(domain: "HomeViewModel", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Missing prepared video asset."
-            ])
-        }
-
-        let reader = try AVAssetReader(asset: asset)
-        if time > .zero {
-            reader.timeRange = CMTimeRange(start: max(.zero, time - seekTolerance), duration: duration - max(.zero, time - seekTolerance))
-        }
-
-        let output = AVAssetReaderTrackOutput(
-            track: videoTrack,
-            outputSettings: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ]
-        )
-        output.alwaysCopiesSampleData = false
-
-        guard reader.canAdd(output) else {
-            throw NSError(domain: "HomeViewModel", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "Unable to attach video output reader."
-            ])
-        }
-
-        reader.add(output)
-        guard reader.startReading() else {
-            throw NSError(domain: "HomeViewModel", code: 3, userInfo: [
-                NSLocalizedDescriptionKey: reader.error?.localizedDescription ?? "Unable to start reading video frames."
-            ])
-        }
-
-        assetReader = reader
-        trackOutput = output
+        addObserversLocked(for: item)
+        emitPlayer(player)
+        emitTimeline(current: 0, duration: duration.seconds)
+        seekLocked(to: .zero, autoplay: true)
     }
 
     private func playLocked() {
@@ -307,179 +236,104 @@ final class HomeViewModel: HomeViewModelProtocol {
             return
         }
 
-        if reachedEndOfVideo, frameBuffer.isEmpty {
-            seekLocked(to: currentTime, autoplay: true)
+        if reachedEndOfVideo {
+            seekLocked(to: .zero, autoplay: true)
             return
         }
 
+        player?.play()
         setPlaybackState(.playing)
-        notifyStatus("Playing at \(currentFPS) FPS.")
-        requestDecodeLocked(generation: generation, minimumCount: targetBufferSize)
-        startTimerLocked()
+        startAnalysisTimerLocked()
+        notifyStatus("Playing. Detecting up to \(currentFPS) FPS.")
     }
 
     private func pauseLocked() {
-        stopTimerLocked()
+        player?.pause()
+        stopAnalysisTimerLocked()
         setPlaybackState(.paused)
-        notifyStatus("Paused at \(formatSeconds(currentTime.seconds)).")
+        notifyStatus("Paused at \(formatSeconds(currentPlaybackTimeLocked().seconds)).")
+    }
+
+    private func seekLocked(to time: CMTime, autoplay: Bool) {
+        guard hasPreparedVideo, let player else {
+            startStreaming()
+            return
+        }
+
+        generation += 1
+        reachedEndOfVideo = false
+        trackingEngine.reset()
+        emitVehicles([])
+        emitTimeline(current: normalizedTime(time).seconds, duration: duration.seconds)
+
+        let targetTime = normalizedTime(time)
+        player.seek(to: targetTime, toleranceBefore: seekTolerance, toleranceAfter: seekTolerance) { [weak self] _ in
+            guard let self else { return }
+            self.stateQueue.async { [weak self] in
+                guard let self else { return }
+                if autoplay {
+                    self.playLocked()
+                } else {
+                    self.setPlaybackState(.paused)
+                    self.notifyStatus("Seeked to \(self.formatSeconds(targetTime.seconds)).")
+                }
+            }
+        }
     }
 
     private func completePlaybackLocked() {
-        stopTimerLocked()
+        stopAnalysisTimerLocked()
+        reachedEndOfVideo = true
         setPlaybackState(.completed)
         notifyStatus("Playback completed. Tap Replay to start again.")
     }
 
     private func failLocked(_ message: String) {
-        stopTimerLocked()
-        cancelReaderLocked()
-        frameBuffer.removeAll(keepingCapacity: true)
+        player?.pause()
+        stopAnalysisTimerLocked()
         setPlaybackState(.failed(message))
         notifyStatus(message)
     }
 
-    private func startTimerLocked() {
-        stopTimerLocked()
+    private func startAnalysisTimerLocked() {
+        stopAnalysisTimerLocked()
 
         let interval = max(1.0 / Double(currentFPS), 0.001)
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
         timer.schedule(deadline: .now(), repeating: interval)
         timer.setEventHandler { [weak self] in
-            self?.renderNextFrameLocked()
+            self?.captureFrameForDetectionLocked()
         }
-        playbackTimer = timer
+        analysisTimer = timer
         timer.resume()
     }
 
-    private func stopTimerLocked() {
-        playbackTimer?.setEventHandler {}
-        playbackTimer?.cancel()
-        playbackTimer = nil
+    private func stopAnalysisTimerLocked() {
+        analysisTimer?.setEventHandler {}
+        analysisTimer?.cancel()
+        analysisTimer = nil
     }
 
-    private func cancelReaderLocked() {
-        assetReader?.cancelReading()
-        assetReader = nil
-        trackOutput = nil
-    }
+    private func captureFrameForDetectionLocked() {
+        guard case .playing = playbackState else { return }
+        guard let output = videoOutput else { return }
 
-    private func renderNextFrameLocked() {
-        if frameBuffer.isEmpty {
-            if reachedEndOfVideo {
-                completePlaybackLocked()
-            } else {
-                requestDecodeLocked(generation: generation, minimumCount: targetBufferSize)
-                notifyStatus("Buffering...")
-            }
+        let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
+        guard output.hasNewPixelBuffer(forItemTime: itemTime),
+              let pixelBuffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil),
+              let frame = makeFrame(from: pixelBuffer, presentationTime: itemTime) else {
             return
         }
 
-        guard case .playing = playbackState else { return }
-
-        let frame = frameBuffer.removeFirst()
-        lastRenderedFrame = frame
-        currentTime = frame.timestamp
         emitFrame(frame)
-        emitTimeline(current: currentTime.seconds, duration: duration.seconds)
 
-        if frameBuffer.count <= refillThreshold {
-            requestDecodeLocked(generation: generation, minimumCount: targetBufferSize)
-        }
-
-        if frameBuffer.isEmpty, reachedEndOfVideo {
-            completePlaybackLocked()
-        } else {
-            notifyStatus("Playing at \(currentFPS) FPS. Buffer \(frameBuffer.count) frames.")
-        }
+        // Drive the async tracking-by-detection engine at the render cadence.
+        // The engine tracks every frame (optical flow) and internally throttles
+        // the heavy CoreML detector, so this call never blocks playback.
+        trackingEngine.processRenderFrame(image: frame.cgImage, timestamp: frame.timestamp)
     }
 
-    private func requestDecodeLocked(generation: Int, minimumCount: Int) {
-        guard isDecodeInFlight == false else { return }
-        guard reachedEndOfVideo == false else { return }
-        guard frameBuffer.count < minimumCount else { return }
-
-        isDecodeInFlight = true
-
-        decodeQueue.async { [weak self] in
-            guard let self else { return }
-            let result = self.decodeFramesBatch(generation: generation, minimumCount: minimumCount)
-            self.stateQueue.async { [weak self] in
-                guard let self else { return }
-                self.isDecodeInFlight = false
-                self.applyDecodedBatch(result, generation: generation)
-            }
-        }
-    }
-
-    private func decodeFramesBatch(generation: Int, minimumCount: Int) -> Result<([HomeVideoFrame], Bool), Error> {
-        guard let output = trackOutput, let reader = assetReader else {
-            return .success(([], true))
-        }
-
-        var decodedFrames: [HomeVideoFrame] = []
-        let wantedCount = max(1, minimumCount - frameBuffer.count)
-
-        while decodedFrames.count < wantedCount {
-            guard let sampleBuffer = output.copyNextSampleBuffer() else {
-                if reader.status == .failed {
-                    return .failure(NSError(domain: "HomeViewModel", code: 4, userInfo: [
-                        NSLocalizedDescriptionKey: reader.error?.localizedDescription ?? "Video reader failed."
-                    ]))
-                }
-
-                return .success((decodedFrames, true))
-            }
-
-            guard let frame = makeFrame(from: sampleBuffer) else {
-                continue
-            }
-
-            if frame.timestamp + seekTolerance < playbackStartTime {
-                continue
-            }
-
-            decodedFrames.append(frame)
-        }
-
-        return .success((decodedFrames, false))
-    }
-
-    private func applyDecodedBatch(_ result: Result<([HomeVideoFrame], Bool), Error>, generation: Int) {
-        guard generation == self.generation else { return }
-
-        switch result {
-        case .failure(let error):
-            failLocked(error.localizedDescription)
-        case .success(let payload):
-            let (decodedFrames, didReachEnd) = payload
-            if frameBuffer.isEmpty, let firstFrame = decodedFrames.first, lastRenderedFrame == nil {
-                lastRenderedFrame = firstFrame
-                currentTime = firstFrame.timestamp
-                emitFrame(firstFrame)
-                emitTimeline(current: currentTime.seconds, duration: duration.seconds)
-            }
-
-            frameBuffer.append(contentsOf: decodedFrames)
-            reachedEndOfVideo = didReachEnd
-
-            if case .loading = playbackState, frameBuffer.isEmpty == false {
-                setPlaybackState(.playing)
-                notifyStatus("Playing at \(currentFPS) FPS.")
-            } else if case .paused = playbackState, let frame = frameBuffer.first, lastRenderedFrame == nil {
-                lastRenderedFrame = frame
-                currentTime = frame.timestamp
-                emitFrame(frame)
-                emitTimeline(current: currentTime.seconds, duration: duration.seconds)
-            }
-        }
-    }
-
-    private func makeFrame(from sampleBuffer: CMSampleBuffer) -> HomeVideoFrame? {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return nil
-        }
-
-        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    private func makeFrame(from pixelBuffer: CVPixelBuffer, presentationTime: CMTime) -> HomeVideoFrame? {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer).transformed(by: preferredTransform)
         let extent = ciImage.extent.integral
         guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else {
@@ -493,6 +347,72 @@ final class HomeViewModel: HomeViewModelProtocol {
         )
     }
 
+    private func resetPlaybackLocked(keepingURL: Bool = false) {
+        generation += 1
+        player?.pause()
+        stopAnalysisTimerLocked()
+        removeObserversLocked()
+        emitPlayer(nil)
+
+        if keepingURL == false {
+            videoURL = nil
+        }
+
+        asset = nil
+        playerItem = nil
+        player = nil
+        videoOutput = nil
+        videoTrack = nil
+        duration = .zero
+        displaySize = .zero
+        preferredTransform = .identity
+        hasPreparedVideo = false
+        isStopped = false
+        reachedEndOfVideo = false
+        trackingEngine.reset()
+        emitVehicles([])
+        emitTimeline(current: 0, duration: 0)
+        setPlaybackState(.idle)
+    }
+
+    private func addObserversLocked(for item: AVPlayerItem) {
+        removeObserversLocked()
+
+        timelineObserver = player?.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
+            queue: stateQueue
+        ) { [weak self] time in
+            guard let self else { return }
+            self.emitTimeline(current: self.normalizedTime(time).seconds, duration: self.duration.seconds)
+        }
+
+        didEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: nil
+        ) { [weak self] _ in
+            self?.stateQueue.async { [weak self] in
+                self?.completePlaybackLocked()
+            }
+        }
+    }
+
+    private func removeObserversLocked() {
+        if let timelineObserver, let player {
+            player.removeTimeObserver(timelineObserver)
+        }
+        timelineObserver = nil
+
+        if let didEndObserver {
+            NotificationCenter.default.removeObserver(didEndObserver)
+        }
+        didEndObserver = nil
+    }
+
+    private func currentPlaybackTimeLocked() -> CMTime {
+        normalizedTime(player?.currentTime() ?? .zero)
+    }
+
     private func normalizedTime(_ time: CMTime) -> CMTime {
         guard time.isNumeric else { return .zero }
         if time < .zero { return .zero }
@@ -504,44 +424,22 @@ final class HomeViewModel: HomeViewModelProtocol {
         let transformedSize = track.naturalSize.applying(track.preferredTransform)
         return CGSize(width: abs(transformedSize.width), height: abs(transformedSize.height))
     }
-    private func emitFrame(_ frame: HomeVideoFrame) {
-        requestPlateDetectionLocked(for: frame, generation: generation)
 
+    private func emitPlayer(_ player: AVPlayer?) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onPlayerChanged?(player)
+        }
+    }
+
+    private func emitFrame(_ frame: HomeVideoFrame) {
         DispatchQueue.main.async { [weak self] in
             self?.onFrameReady?(frame)
         }
     }
 
-    private func requestPlateDetectionLocked(for frame: HomeVideoFrame, generation: Int) {
-//        guard isPlateDetectionInFlight == false else { return }
-//        if lastPlateDetectionTime.isNumeric, frame.timestamp - lastPlateDetectionTime < plateDetectionInterval {
-//            return
-//        }
-//
-//        isPlateDetectionInFlight = true
-//        lastPlateDetectionTime = frame.timestamp
-//
-//        licensePlateDetector.detectLicensePlates(in: frame) { [weak self] result in
-//            guard let self else { return }
-//            self.stateQueue.async { [weak self] in
-//                guard let self else { return }
-//                self.isPlateDetectionInFlight = false
-//                guard generation == self.generation else { return }
-//
-//                switch result {
-//                case .success(let plates):
-//                    self.emitLicensePlates(plates)
-//                case .failure(let error):
-//                    self.emitLicensePlates([])
-//                    self.notifyStatus("License plate detection failed: \(error.localizedDescription)")
-//                }
-//            }
-//        }
-    }
-
-    private func emitLicensePlates(_ plates: [LicensePlateInfo]) {
+    private func emitVehicles(_ vehicles: [VehicleOverlayItem]) {
         DispatchQueue.main.async { [weak self] in
-            self?.onLicensePlatesDetected?(plates)
+            self?.onVehiclesUpdated?(vehicles)
         }
     }
 

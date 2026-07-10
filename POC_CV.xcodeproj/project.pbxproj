@@ -20,6 +20,7 @@
 		8FA82A7C2FDCC10000DF3407 /* POC_CVDependencies in Frameworks */ = {isa = PBXBuildFile; productRef = 8FA82A7B2FDCC10000DF3407 /* POC_CVDependencies */; };
 		8FA82CB92FDBC3EA00DF3407 /* POC_CVDependencies in Frameworks */ = {isa = PBXBuildFile; productRef = 8FA82CB82FDBC3EA00DF3407 /* POC_CVDependencies */; };
 		EA718CC72FFE2D700027FD76 /* CoreML.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA718CC62FFE2D700027FD76 /* CoreML.framework */; };
+		EA718D3E2FFFB1220027FD76 /* Vision.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA718D3D2FFFB1220027FD76 /* Vision.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +36,7 @@
 		8FA82A772FDABB6500DF3407 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		8FA82A792FDABB6D00DF3407 /* ImageIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageIO.framework; path = System/Library/Frameworks/ImageIO.framework; sourceTree = SDKROOT; };
 		EA718CC62FFE2D700027FD76 /* CoreML.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreML.framework; path = System/Library/Frameworks/CoreML.framework; sourceTree = SDKROOT; };
+		EA718D3D2FFFB1220027FD76 /* Vision.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Vision.framework; path = System/Library/Frameworks/Vision.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -63,6 +65,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				EA718D3E2FFFB1220027FD76 /* Vision.framework in Frameworks */,
 				EA718CC72FFE2D700027FD76 /* CoreML.framework in Frameworks */,
 				8FA82A7C2FDCC10000DF3407 /* POC_CVDependencies in Frameworks */,
 				8FA82A7A2FDABB6D00DF3407 /* ImageIO.framework in Frameworks */,
@@ -102,6 +105,7 @@
 		8FA82A662FDABA7500DF3407 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				EA718D3D2FFFB1220027FD76 /* Vision.framework */,
 				EA718CC62FFE2D700027FD76 /* CoreML.framework */,
 				8FA82A792FDABB6D00DF3407 /* ImageIO.framework */,
 				8FA82A772FDABB6500DF3407 /* UIKit.framework */,

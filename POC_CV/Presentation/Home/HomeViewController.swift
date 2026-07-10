@@ -1,15 +1,20 @@
+import AVFoundation
 import UIKit
 import SnapKit
 
 final class FrameRenderView: UIView {
     override class var layerClass: AnyClass {
-        CALayer.self
+        AVPlayerLayer.self
+    }
+
+    private var playerLayer: AVPlayerLayer {
+        layer as! AVPlayerLayer
     }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        layer.contentsGravity = .resizeAspect
-        layer.isOpaque = true
+        playerLayer.videoGravity = .resizeAspect
+        playerLayer.isOpaque = true
     }
 
     @available(*, unavailable)
@@ -17,13 +22,16 @@ final class FrameRenderView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func render(_ frame: HomeVideoFrame) {
-        layer.contents = frame.cgImage
+    func setPlayer(_ player: AVPlayer?) {
+        playerLayer.player = player
     }
 }
 
-final class LicensePlateOverlayView: UIView {
-    private var plates: [LicensePlateInfo] = []
+/// Draws tracked-vehicle boxes and their license-plate labels. Boxes are given
+/// in source-image pixel space (top-left origin) and mapped into the aspect-fit
+/// video rect here, matching `AVLayerVideoGravity.resizeAspect`.
+final class VehicleOverlayView: UIView {
+    private var items: [VehicleOverlayItem] = []
     private var imageSize: CGSize = .zero
 
     override init(frame: CGRect) {
@@ -38,8 +46,8 @@ final class LicensePlateOverlayView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(plates: [LicensePlateInfo]) {
-        self.plates = plates
+    func update(items: [VehicleOverlayItem]) {
+        self.items = items
         setNeedsDisplay()
     }
 
@@ -55,35 +63,32 @@ final class LicensePlateOverlayView: UIView {
 
         let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
         let renderedImageSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-        let renderedImageRect = CGRect(
+        let origin = CGPoint(
             x: (bounds.width - renderedImageSize.width) / 2,
-            y: (bounds.height - renderedImageSize.height) / 2,
-            width: renderedImageSize.width,
-            height: renderedImageSize.height
+            y: (bounds.height - renderedImageSize.height) / 2
         )
 
         context.setLineWidth(2)
-        context.setStrokeColor(UIColor.systemYellow.cgColor)
-        context.setFillColor(UIColor.systemYellow.withAlphaComponent(0.18).cgColor)
 
-        for plate in plates {
+        for item in items {
+            let color: UIColor = item.plateText == nil ? .systemYellow : .systemGreen
             let displayRect = CGRect(
-                x: renderedImageRect.minX + plate.rect.minX * scale,
-                y: renderedImageRect.minY + plate.rect.minY * scale,
-                width: plate.rect.width * scale,
-                height: plate.rect.height * scale
+                x: origin.x + item.rect.minX * scale,
+                y: origin.y + item.rect.minY * scale,
+                width: item.rect.width * scale,
+                height: item.rect.height * scale
             )
 
+            context.setStrokeColor(color.cgColor)
+            context.setFillColor(color.withAlphaComponent(0.12).cgColor)
             context.fill(displayRect)
             context.stroke(displayRect)
-            drawLabel(for: plate, in: displayRect)
+            drawLabel(for: item, color: color, in: displayRect)
         }
     }
 
-    private func drawLabel(for plate: LicensePlateInfo, in rect: CGRect) {
-        let labelText = plate.text?.isEmpty == false
-            ? plate.text ?? ""
-            : String(format: "%.0f%%", plate.confidence * 100)
+    private func drawLabel(for item: VehicleOverlayItem, color: UIColor, in rect: CGRect) {
+        let labelText = item.plateText ?? String(format: "%.0f%%", item.confidence * 100)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
             .foregroundColor: UIColor.black
@@ -96,12 +101,9 @@ final class LicensePlateOverlayView: UIView {
             height: textSize.height + 4
         )
 
-        UIColor.systemYellow.setFill()
+        color.setFill()
         UIBezierPath(roundedRect: labelRect, cornerRadius: 4).fill()
-        labelText.draw(
-            in: labelRect.insetBy(dx: 4, dy: 2),
-            withAttributes: attributes
-        )
+        labelText.draw(in: labelRect.insetBy(dx: 4, dy: 2), withAttributes: attributes)
     }
 }
 
@@ -109,7 +111,7 @@ final class HomeViewController: UIViewController {
     private let viewModel: HomeViewModelProtocol
     private let frameContainerView = UIView()
     private let frameRenderView = FrameRenderView()
-    private let licensePlateOverlayView = LicensePlateOverlayView()
+    private let vehicleOverlayView = VehicleOverlayView()
     private let statusLabel = UILabel()
     private let controlsStackView = UIStackView()
     private let playPauseButton = UIButton(type: .system)
@@ -175,11 +177,11 @@ final class HomeViewController: UIViewController {
         fpsValueLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
         fpsValueLabel.textColor = .label
         fpsValueLabel.textAlignment = .right
-        fpsValueLabel.text = "12 FPS"
+        fpsValueLabel.text = "30 FPS"
 
         fpsSlider.minimumValue = 1
         fpsSlider.maximumValue = 60
-        fpsSlider.value = 12
+        fpsSlider.value = 30
         fpsSlider.addTarget(self, action: #selector(handleFPSSliderChanged), for: .valueChanged)
 
         currentTimeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
@@ -219,7 +221,7 @@ final class HomeViewController: UIViewController {
 
         view.addSubview(frameContainerView)
         frameContainerView.addSubview(frameRenderView)
-        frameContainerView.addSubview(licensePlateOverlayView)
+        frameContainerView.addSubview(vehicleOverlayView)
         view.addSubview(controlsStackView)
         view.addSubview(timelineStackView)
         view.addSubview(fpsValueLabel)
@@ -237,7 +239,7 @@ final class HomeViewController: UIViewController {
             make.edges.equalToSuperview()
         }
 
-        licensePlateOverlayView.snp.makeConstraints { make in
+        vehicleOverlayView.snp.makeConstraints { make in
             make.edges.equalToSuperview()
         }
 
@@ -271,12 +273,16 @@ final class HomeViewController: UIViewController {
     }
 
     private func bindViewModel() {
+        viewModel.onPlayerChanged = { [weak self] player in
+            self?.frameRenderView.setPlayer(player)
+        }
+
         viewModel.onFrameReady = { [weak self] frame in
             self?.render(frame: frame)
         }
 
-        viewModel.onLicensePlatesDetected = { [weak self] plates in
-            self?.licensePlateOverlayView.update(plates: plates)
+        viewModel.onVehiclesUpdated = { [weak self] items in
+            self?.vehicleOverlayView.update(items: items)
         }
 
         viewModel.onStatusChanged = { [weak self] message in
@@ -298,8 +304,7 @@ final class HomeViewController: UIViewController {
     }
 
     private func render(frame: HomeVideoFrame) {
-        frameRenderView.render(frame)
-        licensePlateOverlayView.updateImageSize(CGSize(width: frame.cgImage.width, height: frame.cgImage.height))
+        vehicleOverlayView.updateImageSize(CGSize(width: frame.cgImage.width, height: frame.cgImage.height))
         let aspectText = String(format: "%.0fx%.0f", frame.size.width, frame.size.height)
         navigationItem.prompt = "Aspect \(aspectText)"
     }
