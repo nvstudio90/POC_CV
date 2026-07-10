@@ -36,6 +36,11 @@ final class TrackingEngine {
         static let reocrGrowthFactor: CGFloat = 1.4
         /// Minimum spacing between vehicle-detection submissions (battery cap).
         static let detectionMinInterval: CFTimeInterval = 1.0 / 30.0
+        /// Render frames admitted onto `trackingQueue` but not yet processed.
+        /// Each enqueued frame retains a full pixel buffer, so when optical-flow
+        /// tracking runs slower than the render cadence the backlog must be
+        /// bounded — excess frames are dropped, never queued.
+        static let maxQueuedRenderFrames = 2
     }
 
     private let trackingQueue = DispatchQueue(label: "com.poccv.tracking.engine", qos: .userInitiated)
@@ -46,6 +51,11 @@ final class TrackingEngine {
     private var pendingOCR: Set<UUID> = []
     private var lastOCRHeight: [UUID: CGFloat] = [:]
     private var lastDetectionSubmit: CFTimeInterval = 0
+
+    /// Guards `queuedRenderFrames` — touched from the render tick (state queue)
+    /// and from `trackingQueue`.
+    private let queueDepthLock = NSLock()
+    private var queuedRenderFrames = 0
 
     init() {
         coordinator = AsyncDetectionCoordinator(callbackQueue: trackingQueue)
@@ -68,8 +78,25 @@ final class TrackingEngine {
     /// happens here — that only happens deep inside the async detector path,
     /// and only at its own throttled cadence.
     func processRenderFrame(pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation, timestamp: CMTime) {
+        // Back-pressure: if tracking is already behind, drop the frame *now*
+        // instead of enqueuing it — a queued block retains the pixel buffer,
+        // and an unbounded backlog of full frames is a memory kill on
+        // constrained devices. Optical flow tolerates skipped frames.
+        queueDepthLock.lock()
+        guard queuedRenderFrames < Constants.maxQueuedRenderFrames else {
+            queueDepthLock.unlock()
+            return
+        }
+        queuedRenderFrames += 1
+        queueDepthLock.unlock()
+
         trackingQueue.async { [weak self] in
             guard let self else { return }
+            defer {
+                self.queueDepthLock.lock()
+                self.queuedRenderFrames -= 1
+                self.queueDepthLock.unlock()
+            }
 
             // 1. Advance optical-flow tracks (handles the missing t+n frames).
             let vehicles = self.tracker.track(in: pixelBuffer, orientation: orientation, timestamp: timestamp)

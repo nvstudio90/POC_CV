@@ -34,7 +34,10 @@ final class HierarchicalDetectionPipeline {
     private let vehicleDetector: VehicleDetector
     private let plateLocator: LicensePlateLocator
     private let plateRecognizer: LicensePlateRecognizer
-    private let ciContext = CIContext()
+    // `cacheIntermediates: false` — this context renders a different full-res
+    // frame every pass, so Core Image's intermediate cache only accumulates
+    // memory without ever getting a hit.
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
     /// One-slot cache so detection + the plate jobs issued on the *same* frame
     /// share a single buffer→CGImage conversion (the old CGImage pipeline had
     /// this property implicitly — everything reused one upstream conversion).
@@ -100,6 +103,13 @@ final class HierarchicalDetectionPipeline {
             confidence: reading.confidence,
             sourceHeight: plateRectInFrame.height
         )
+    }
+
+    /// Drops the cached buffer + upright CGImage (~2 full frames of memory).
+    /// Called by the coordinator when its queue goes idle; must run on the
+    /// detector queue like everything else here.
+    func releaseCachedFrame() {
+        cachedUpright = nil
     }
 
     /// The single point where a `CVPixelBuffer` becomes a `CGImage`, upright

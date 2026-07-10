@@ -17,6 +17,15 @@ import ImageIO
 /// Results are delivered on `callbackQueue` (the engine's tracking queue) so all
 /// tracker mutations remain serialised.
 final class AsyncDetectionCoordinator {
+    private enum Constants {
+        /// Every queued plate job retains the full video frame it was submitted
+        /// with, so in dense traffic an uncapped queue pins one full-resolution
+        /// buffer per vehicle — enough to get the app jetsam-killed. Oldest
+        /// jobs beyond this cap are dropped and reported as unresolved; the
+        /// engine simply retries once the vehicle has grown.
+        static let maxQueuedPlateJobs = 3
+    }
+
     struct Frame {
         let pixelBuffer: CVPixelBuffer
         let orientation: CGImagePropertyOrientation
@@ -60,10 +69,27 @@ final class AsyncDetectionCoordinator {
 
     /// Requests plate location + OCR for a specific tracked vehicle.
     func submitPlateResolution(id: UUID, vehicleRect: CGRect, frame: Frame) {
+        var droppedIDs: [UUID] = []
         lock.lock()
         if pendingPlateJobs[id] == nil { plateJobOrder.append(id) }
         pendingPlateJobs[id] = (rect: vehicleRect, frame: frame)
+        while plateJobOrder.count > Constants.maxQueuedPlateJobs {
+            let dropped = plateJobOrder.removeFirst()
+            pendingPlateJobs[dropped] = nil
+            droppedIDs.append(dropped)
+        }
         lock.unlock()
+
+        // Dropped jobs must still be reported, otherwise their vehicles stay
+        // `.pending` forever and are never re-submitted.
+        if droppedIDs.isEmpty == false {
+            callbackQueue.async { [weak self] in
+                guard let self else { return }
+                for droppedID in droppedIDs {
+                    self.onPlateResolved?(nil, droppedID, frame.timestamp)
+                }
+            }
+        }
         drain()
     }
 
@@ -82,6 +108,10 @@ final class AsyncDetectionCoordinator {
         pendingPlateJobs.removeAll()
         plateJobOrder.removeAll()
         lock.unlock()
+        // Hop to the detector queue — the pipeline is confined to it.
+        workQueue.async { [weak self] in
+            self?.pipeline.releaseCachedFrame()
+        }
     }
 
     // MARK: - Work scheduling
@@ -137,34 +167,47 @@ final class AsyncDetectionCoordinator {
     }
 
     private func execute(_ work: Work) {
-        switch work {
-        case .detect(let frame):
-            do {
-                let detections = try pipeline.detectVehicles(in: frame.pixelBuffer, orientation: frame.orientation)
-                callbackQueue.async { [weak self] in
-                    self?.onVehiclesDetected?(detections, frame.imageSize, frame.timestamp)
+        // The CoreML/Vision/CoreImage stack autoreleases sizeable intermediates
+        // (full-frame CGImages, feature buffers); drain them per work item so
+        // they never pile up on this long-lived queue.
+        autoreleasepool {
+            switch work {
+            case .detect(let frame):
+                do {
+                    let detections = try pipeline.detectVehicles(in: frame.pixelBuffer, orientation: frame.orientation)
+                    callbackQueue.async { [weak self] in
+                        self?.onVehiclesDetected?(detections, frame.imageSize, frame.timestamp)
+                    }
+                } catch {
+                    deliver(error)
                 }
-            } catch {
-                deliver(error)
-            }
 
-        case .plate(let id, let rect, let frame):
-            do {
-                let resolution = try pipeline.resolvePlate(forVehicleRect: rect, in: frame.pixelBuffer, orientation: frame.orientation)
-                callbackQueue.async { [weak self] in
-                    self?.onPlateResolved?(resolution, id, frame.timestamp)
+            case .plate(let id, let rect, let frame):
+                do {
+                    let resolution = try pipeline.resolvePlate(forVehicleRect: rect, in: frame.pixelBuffer, orientation: frame.orientation)
+                    callbackQueue.async { [weak self] in
+                        self?.onPlateResolved?(resolution, id, frame.timestamp)
+                    }
+                } catch {
+                    callbackQueue.async { [weak self] in
+                        self?.onPlateResolved?(nil, id, frame.timestamp)
+                    }
+                    deliver(error)
                 }
-            } catch {
-                callbackQueue.async { [weak self] in
-                    self?.onPlateResolved?(nil, id, frame.timestamp)
-                }
-                deliver(error)
             }
         }
 
         lock.lock()
         isBusy = false
+        let idle = pendingFrame == nil && plateJobOrder.isEmpty
         lock.unlock()
+
+        if idle {
+            // No follow-up work queued — release the cached full-frame
+            // buffer + CGImage so a paused/idle app drops ~2 frames of memory.
+            // (Still on the detector queue, so this is safe.)
+            pipeline.releaseCachedFrame()
+        }
         drain()
     }
 

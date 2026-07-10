@@ -25,10 +25,27 @@ import Metal
 ///
 /// Not thread-safe: call from a single serial queue (the capture path does).
 final class PixelBufferConverter {
+    private enum Constants {
+        /// Hard cap on buffers vended from the pool that are still alive
+        /// (retained downstream by the display layer, the tracker queue,
+        /// pending detection/OCR jobs…). Once downstream holds this many
+        /// frames the conversion fails and the render tick drops the frame —
+        /// back-pressure instead of unbounded pool growth, which is what got
+        /// the app jetsam-killed on memory-constrained devices.
+        static let maxLiveBuffers = 10
+        /// Idle buffers cached by the pool are freed once they sit unused
+        /// this long, so a burst (many vehicles → many retained frames) does
+        /// not permanently inflate the footprint.
+        static let maxBufferAge: TimeInterval = 1.0
+    }
+
     private let context: CIContext
     private var pool: CVPixelBufferPool?
     private var poolWidth = 0
     private var poolHeight = 0
+    private let auxAttributes = [
+        kCVPixelBufferPoolAllocationThresholdKey as String: Constants.maxLiveBuffers
+    ] as CFDictionary
 
     init() {
         // Disable color management (`workingColorSpace: NSNull`). Without this,
@@ -67,8 +84,15 @@ final class PixelBufferConverter {
         }
 
         var output: CVPixelBuffer?
-        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output) == kCVReturnSuccess,
-              let output else {
+        let status = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, auxAttributes, &output)
+        if status == kCVReturnWouldExceedAllocationThreshold {
+            // Downstream is still holding `maxLiveBuffers` frames. Reclaim any
+            // idle cached buffers and drop this frame — the next render tick
+            // delivers a fresh one, and the pipeline output is unaffected.
+            CVPixelBufferPoolFlush(pool, .excessBuffers)
+            return nil
+        }
+        guard status == kCVReturnSuccess, let output else {
             return nil
         }
 
@@ -95,8 +119,12 @@ final class PixelBufferConverter {
             kCVPixelBufferMetalCompatibilityKey as String: true
         ]
 
+        let poolAttributes: [String: Any] = [
+            kCVPixelBufferPoolMaximumBufferAgeKey as String: Constants.maxBufferAge
+        ]
+
         var newPool: CVPixelBufferPool?
-        guard CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &newPool) == kCVReturnSuccess else {
+        guard CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttributes as CFDictionary, attributes as CFDictionary, &newPool) == kCVReturnSuccess else {
             return nil
         }
 
