@@ -1,6 +1,8 @@
 import CoreGraphics
 import CoreMedia
+import CoreVideo
 import Foundation
+import ImageIO
 
 /// The asynchronous half of the "tracking-by-detection" design. It owns a single
 /// serial queue on which the (expensive) hierarchical CoreML pipeline runs,
@@ -16,9 +18,10 @@ import Foundation
 /// tracker mutations remain serialised.
 final class AsyncDetectionCoordinator {
     struct Frame {
-        let image: CGImage
+        let pixelBuffer: CVPixelBuffer
+        let orientation: CGImagePropertyOrientation
         let timestamp: CMTime
-        var imageSize: CGSize { CGSize(width: image.width, height: image.height) }
+        var imageSize: CGSize { VisionGeometry.orientedImageSize(of: pixelBuffer, orientation: orientation) }
     }
 
     var onVehiclesDetected: (([VehicleDetection], CGSize, CMTime) -> Void)?
@@ -34,6 +37,7 @@ final class AsyncDetectionCoordinator {
     private var pendingFrame: Frame?
     private var pendingPlateJobs: [UUID: (rect: CGRect, frame: Frame)] = [:]
     private var plateJobOrder: [UUID] = []
+    private var lastWorkWasDetection = false
 
     init(
         pipeline: HierarchicalDetectionPipeline = HierarchicalDetectionPipeline(),
@@ -61,6 +65,15 @@ final class AsyncDetectionCoordinator {
         pendingPlateJobs[id] = (rect: vehicleRect, frame: frame)
         lock.unlock()
         drain()
+    }
+
+    /// Drops queued plate jobs whose vehicle no longer exists — OCR on a dead
+    /// track is wasted work and its result would be discarded anyway.
+    func cancelPlateJobs(notIn active: Set<UUID>) {
+        lock.lock()
+        pendingPlateJobs = pendingPlateJobs.filter { active.contains($0.key) }
+        plateJobOrder.removeAll { pendingPlateJobs[$0] == nil }
+        lock.unlock()
     }
 
     func reset() {
@@ -92,13 +105,28 @@ final class AsyncDetectionCoordinator {
         }
     }
 
-    /// Detection is prioritised over OCR: fresh vehicle positions keep the tracker
-    /// honest, and OCR is a lazy "read once when big" operation.
+    /// Detection is preferred (fresh vehicle positions keep the tracker honest)
+    /// but must not monopolise the queue: the render loop replaces
+    /// `pendingFrame` every ~33 ms, so whenever one detection pass takes longer
+    /// than a frame interval there is *always* a fresh frame waiting — a strict
+    /// detection-first policy then starves plate OCR forever and no plate is
+    /// ever read. Alternate instead: after a detection slot, a waiting plate
+    /// job gets the next slot.
     private func nextWorkLocked() -> Work? {
+        if lastWorkWasDetection, let plateJob = nextPlateJobLocked() {
+            lastWorkWasDetection = false
+            return plateJob
+        }
         if let frame = pendingFrame {
             pendingFrame = nil
+            lastWorkWasDetection = true
             return .detect(frame)
         }
+        lastWorkWasDetection = false
+        return nextPlateJobLocked()
+    }
+
+    private func nextPlateJobLocked() -> Work? {
         while let id = plateJobOrder.first {
             plateJobOrder.removeFirst()
             if let job = pendingPlateJobs.removeValue(forKey: id) {
@@ -112,7 +140,7 @@ final class AsyncDetectionCoordinator {
         switch work {
         case .detect(let frame):
             do {
-                let detections = try pipeline.detectVehicles(in: frame.image)
+                let detections = try pipeline.detectVehicles(in: frame.pixelBuffer, orientation: frame.orientation)
                 callbackQueue.async { [weak self] in
                     self?.onVehiclesDetected?(detections, frame.imageSize, frame.timestamp)
                 }
@@ -122,7 +150,7 @@ final class AsyncDetectionCoordinator {
 
         case .plate(let id, let rect, let frame):
             do {
-                let resolution = try pipeline.resolvePlate(forVehicleRect: rect, in: frame.image)
+                let resolution = try pipeline.resolvePlate(forVehicleRect: rect, in: frame.pixelBuffer, orientation: frame.orientation)
                 callbackQueue.async { [weak self] in
                     self?.onPlateResolved?(resolution, id, frame.timestamp)
                 }

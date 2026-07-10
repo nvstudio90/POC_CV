@@ -1,10 +1,16 @@
 import AVFoundation
-import CoreImage
+import CoreVideo
 import Foundation
+import ImageIO
 import QuartzCore
 
 struct HomeVideoFrame {
-    let cgImage: CGImage
+    /// Raw, unrotated pixel buffer straight from the video output. No
+    /// `CGImage` conversion happens for this — the display layer and the
+    /// tracking engine both consume the buffer directly.
+    let pixelBuffer: CVPixelBuffer
+    /// How `pixelBuffer` must be rotated to appear upright.
+    let orientation: CGImagePropertyOrientation
     let size: CGSize
     let timestamp: CMTime
 }
@@ -51,7 +57,7 @@ final class HomeViewModel: HomeViewModelProtocol {
 
     private let stateQueue = DispatchQueue(label: "com.poccv.home.video.state", qos: .userInitiated)
     private let trackingEngine = TrackingEngine()
-    private let ciContext = CIContext()
+    private let pixelBufferConverter = PixelBufferConverter()
     private let defaultFPS = 30
     private let minFPS = 1
     private let maxFPS = 60
@@ -65,6 +71,7 @@ final class HomeViewModel: HomeViewModelProtocol {
     private var videoTrack: AVAssetTrack?
     private var displaySize = CGSize.zero
     private var preferredTransform = CGAffineTransform.identity
+    private var frameOrientation = CGImagePropertyOrientation.up
     private var duration = CMTime.zero
 
     private var analysisTimer: DispatchSourceTimer?
@@ -219,6 +226,7 @@ final class HomeViewModel: HomeViewModelProtocol {
         self.videoTrack = videoTrack
         duration = asset.duration
         preferredTransform = videoTrack.preferredTransform
+        frameOrientation = VisionGeometry.orientation(fromPreferredTransform: preferredTransform)
         displaySize = displaySize(for: videoTrack)
         hasPreparedVideo = true
         reachedEndOfVideo = false
@@ -320,28 +328,36 @@ final class HomeViewModel: HomeViewModelProtocol {
 
         let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
         guard output.hasNewPixelBuffer(forItemTime: itemTime),
-              let pixelBuffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil),
-              let frame = makeFrame(from: pixelBuffer, presentationTime: itemTime) else {
+              let sourceBuffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) else {
             return
         }
 
+        // `copyPixelBuffer` hands back a buffer from the video output's own pool.
+        // The tracking engine retains it across several async hops (optical-flow
+        // tracking, the throttled CoreML detector, and plate OCR that runs much
+        // later), during which the pool can recycle its backing IOSurface — so
+        // the models end up reading stale/overwritten pixels and detection fails.
+        // Render it into a self-owned BGRA buffer on the GPU (Core Image) first;
+        // that copy is decoupled from the AV pool and safe to retain downstream.
+        // Both the display layer and the engine consume this converted buffer so
+        // the on-screen frame stays exactly the one that was analysed.
+        guard let pixelBuffer = pixelBufferConverter.convertToBGRA(sourceBuffer) else {
+            return
+        }
+
+        let frame = makeFrame(from: pixelBuffer, presentationTime: itemTime)
         emitFrame(frame)
 
         // Drive the async tracking-by-detection engine at the render cadence.
         // The engine tracks every frame (optical flow) and internally throttles
         // the heavy CoreML detector, so this call never blocks playback.
-        trackingEngine.processRenderFrame(image: frame.cgImage, timestamp: frame.timestamp)
+        trackingEngine.processRenderFrame(pixelBuffer: pixelBuffer, orientation: frameOrientation, timestamp: frame.timestamp)
     }
 
-    private func makeFrame(from pixelBuffer: CVPixelBuffer, presentationTime: CMTime) -> HomeVideoFrame? {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).transformed(by: preferredTransform)
-        let extent = ciImage.extent.integral
-        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else {
-            return nil
-        }
-
-        return HomeVideoFrame(
-            cgImage: cgImage,
+    private func makeFrame(from pixelBuffer: CVPixelBuffer, presentationTime: CMTime) -> HomeVideoFrame {
+        HomeVideoFrame(
+            pixelBuffer: pixelBuffer,
+            orientation: frameOrientation,
             size: displaySize,
             timestamp: normalizedTime(presentationTime)
         )
@@ -366,6 +382,7 @@ final class HomeViewModel: HomeViewModelProtocol {
         duration = .zero
         displaySize = .zero
         preferredTransform = .identity
+        frameOrientation = .up
         hasPreparedVideo = false
         isStopped = false
         reachedEndOfVideo = false

@@ -1,6 +1,8 @@
 import CoreGraphics
 import CoreMedia
+import CoreVideo
 import Foundation
+import ImageIO
 import Vision
 
 /// The lightweight, per-frame tracker that runs at the full 30 FPS render rate.
@@ -33,16 +35,18 @@ final class VehicleTracker {
 
     /// Advances every active track by one frame of optical flow and returns the
     /// updated set. Tracks that Vision loses (or that have drifted too long
-    /// without a detection correction) are dropped.
+    /// without a detection correction) are dropped. `pixelBuffer` is the raw,
+    /// *unrotated* frame straight from the video output — Vision applies
+    /// `orientation` internally, so no `CGImage`/`CIImage` conversion is needed.
     @discardableResult
-    func track(in image: CGImage, timestamp: CMTime) -> [TrackedVehicle] {
+    func track(in pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation, timestamp: CMTime) -> [TrackedVehicle] {
         guard vehicles.isEmpty == false else { return [] }
 
-        let imageSize = CGSize(width: image.width, height: image.height)
+        let imageSize = VisionGeometry.orientedImageSize(of: pixelBuffer, orientation: orientation)
         let requests: [VNRequest] = vehicles.values.map { $0.trackingRequest }
 
         do {
-            try sequenceHandler.perform(requests, on: image, orientation: .up)
+            try sequenceHandler.perform(requests, on: pixelBuffer, orientation: orientation)
         } catch {
             // A failed sequence pass shouldn't nuke state; keep the last boxes.
             return Array(vehicles.values)

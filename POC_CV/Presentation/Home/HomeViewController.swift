@@ -1,20 +1,30 @@
 import AVFoundation
+import CoreMedia
+import ImageIO
 import UIKit
 import SnapKit
 
-final class FrameRenderView: UIView {
+/// Displays the raw `CVPixelBuffer`s coming out of the analysis pipeline
+/// directly via `AVSampleBufferDisplayLayer`, instead of showing the `AVPlayer`
+/// through an `AVPlayerLayer`. This guarantees the frame on screen is always
+/// exactly the frame the tracker/detector just analysed, so the vehicle overlay
+/// never drifts out of sync with the video — even when the analysis FPS is
+/// throttled well below native playback rate.
+final class PixelBufferDisplayView: UIView {
     override class var layerClass: AnyClass {
-        AVPlayerLayer.self
+        AVSampleBufferDisplayLayer.self
     }
 
-    private var playerLayer: AVPlayerLayer {
-        layer as! AVPlayerLayer
+    private var displayLayer: AVSampleBufferDisplayLayer {
+        layer as! AVSampleBufferDisplayLayer
     }
+
+    private var appliedOrientation: CGImagePropertyOrientation?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        playerLayer.videoGravity = .resizeAspect
-        playerLayer.isOpaque = true
+        displayLayer.videoGravity = .resizeAspect
+        displayLayer.isOpaque = true
     }
 
     @available(*, unavailable)
@@ -22,8 +32,56 @@ final class FrameRenderView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func setPlayer(_ player: AVPlayer?) {
-        playerLayer.player = player
+    /// Enqueues one raw, unrotated pixel buffer for immediate display, rotating
+    /// it upright per `orientation` (applied once and cached — cheap to call
+    /// every frame).
+    func enqueue(pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
+        if appliedOrientation != orientation {
+            appliedOrientation = orientation
+            displayLayer.setAffineTransform(VisionGeometry.displayRotationTransform(for: orientation))
+        }
+
+        if displayLayer.status == .failed {
+            displayLayer.flush()
+        }
+        guard displayLayer.isReadyForMoreMediaData else { return }
+
+        var formatDescription: CMFormatDescription?
+        let formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescriptionOut: &formatDescription
+        )
+        guard formatStatus == noErr, let formatDescription else { return }
+
+        var timingInfo = CMSampleTimingInfo(
+            duration: .invalid,
+            presentationTimeStamp: .zero,
+            decodeTimeStamp: .invalid
+        )
+
+        var sampleBuffer: CMSampleBuffer?
+        let bufferStatus = CMSampleBufferCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: formatDescription,
+            sampleTiming: &timingInfo,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard bufferStatus == noErr, let sampleBuffer else { return }
+
+        // We pace frames ourselves (at the user-selected analysis FPS) rather
+        // than relying on the layer's own clock, so ask it to show each buffer
+        // the moment it's enqueued.
+        if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true) as? [NSMutableDictionary],
+           let attachments = attachmentsArray.first {
+            attachments[kCMSampleAttachmentKey_DisplayImmediately as String] = true
+        }
+
+        displayLayer.enqueue(sampleBuffer)
     }
 }
 
@@ -113,7 +171,7 @@ final class VehicleOverlayView: UIView {
 final class HomeViewController: UIViewController {
     private let viewModel: HomeViewModelProtocol
     private let frameContainerView = UIView()
-    private let frameRenderView = FrameRenderView()
+    private let pixelBufferDisplayView = PixelBufferDisplayView()
     private let vehicleOverlayView = VehicleOverlayView()
     private let statusLabel = UILabel()
     private let controlsStackView = UIStackView()
@@ -163,7 +221,7 @@ final class HomeViewController: UIViewController {
         frameContainerView.layer.cornerRadius = 16
         frameContainerView.clipsToBounds = true
 
-        frameRenderView.backgroundColor = .black
+        pixelBufferDisplayView.backgroundColor = .black
 
         statusLabel.textColor = .secondaryLabel
         statusLabel.font = .systemFont(ofSize: 15, weight: .medium)
@@ -223,7 +281,7 @@ final class HomeViewController: UIViewController {
         }
 
         view.addSubview(frameContainerView)
-        frameContainerView.addSubview(frameRenderView)
+        frameContainerView.addSubview(pixelBufferDisplayView)
         frameContainerView.addSubview(vehicleOverlayView)
         view.addSubview(controlsStackView)
         view.addSubview(timelineStackView)
@@ -238,7 +296,7 @@ final class HomeViewController: UIViewController {
             make.height.greaterThanOrEqualTo(220)
         }
 
-        frameRenderView.snp.makeConstraints { make in
+        pixelBufferDisplayView.snp.makeConstraints { make in
             make.edges.equalToSuperview()
         }
 
@@ -276,9 +334,10 @@ final class HomeViewController: UIViewController {
     }
 
     private func bindViewModel() {
-        viewModel.onPlayerChanged = { [weak self] player in
-            self?.frameRenderView.setPlayer(player)
-        }
+        // The `AVPlayer` still owns decoding/timing/seek internally (the view
+        // model uses it to drive `AVPlayerItemVideoOutput`), but it no longer
+        // needs to be attached to a visible layer: `pixelBufferDisplayView`
+        // renders the exact pixel buffers the tracking engine analyses.
 
         viewModel.onFrameReady = { [weak self] frame in
             self?.render(frame: frame)
@@ -307,7 +366,8 @@ final class HomeViewController: UIViewController {
     }
 
     private func render(frame: HomeVideoFrame) {
-        vehicleOverlayView.updateImageSize(CGSize(width: frame.cgImage.width, height: frame.cgImage.height))
+        pixelBufferDisplayView.enqueue(pixelBuffer: frame.pixelBuffer, orientation: frame.orientation)
+        vehicleOverlayView.updateImageSize(frame.size)
         let aspectText = String(format: "%.0fx%.0f", frame.size.width, frame.size.height)
         navigationItem.prompt = "Aspect \(aspectText)"
     }

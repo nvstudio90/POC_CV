@@ -1,6 +1,8 @@
 import CoreGraphics
 import CoreMedia
+import CoreVideo
 import Foundation
+import ImageIO
 import QuartzCore
 
 /// Facade that fuses the fast Vision tracker (30 FPS) with the slow asynchronous
@@ -60,19 +62,22 @@ final class TrackingEngine {
 
     // MARK: - Render loop entry point (30 FPS)
 
-    /// Feed one frame from the render loop. `image` must be the full-resolution,
-    /// upright frame (top-left origin) — the same space the detector uses.
-    func processRenderFrame(image: CGImage, timestamp: CMTime) {
+    /// Feed one frame from the render loop. `pixelBuffer` is the raw,
+    /// *unrotated* buffer straight from the video output; `orientation` tells
+    /// Vision/CoreML how to interpret it upright. No `CGImage` conversion
+    /// happens here — that only happens deep inside the async detector path,
+    /// and only at its own throttled cadence.
+    func processRenderFrame(pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation, timestamp: CMTime) {
         trackingQueue.async { [weak self] in
             guard let self else { return }
 
             // 1. Advance optical-flow tracks (handles the missing t+n frames).
-            let vehicles = self.tracker.track(in: image, timestamp: timestamp)
+            let vehicles = self.tracker.track(in: pixelBuffer, orientation: orientation, timestamp: timestamp)
 
             // 2. Emit overlay immediately so the UI never stalls on detection.
             self.emitOverlay(for: vehicles)
 
-            let frame = AsyncDetectionCoordinator.Frame(image: image, timestamp: timestamp)
+            let frame = AsyncDetectionCoordinator.Frame(pixelBuffer: pixelBuffer, orientation: orientation, timestamp: timestamp)
 
             // 3. Keep the detector fed with the freshest frame (self-throttling).
             let now = CACurrentMediaTime()
@@ -82,7 +87,7 @@ final class TrackingEngine {
             }
 
             // 4. Lazily OCR plates that are now large enough.
-            self.scheduleOCRIfNeeded(for: vehicles, frame: frame, imageHeight: CGFloat(image.height))
+            self.scheduleOCRIfNeeded(for: vehicles, frame: frame, imageHeight: frame.imageSize.height)
         }
     }
 
@@ -108,6 +113,7 @@ final class TrackingEngine {
         plateStore.retain(ids: active)
         pendingOCR.formIntersection(active)
         lastOCRHeight = lastOCRHeight.filter { active.contains($0.key) }
+        coordinator.cancelPlateJobs(notIn: active)
     }
 
     private func handlePlateResolution(_ resolution: PlateResolution?, for id: UUID, timestamp: CMTime) {
@@ -121,7 +127,9 @@ final class TrackingEngine {
             return
         }
 
-        lastOCRHeight[id] = resolution.sourceHeight
+        // Note: `lastOCRHeight` is recorded at submit time (vehicle-box height).
+        // `resolution.sourceHeight` is the *plate* height — comparing that with
+        // vehicle heights made `grewEnough` always true and re-OCR'd endlessly.
         plateStore.store(resolution, for: id, at: timestamp)
         // Always surface the *best* stored reading (may be an earlier, sharper one).
         if let best = plateStore.record(for: id) {
@@ -147,9 +155,12 @@ final class TrackingEngine {
 
             let needsRead: Bool
             switch vehicle.plateState {
-            case .resolved:
-                needsRead = grewEnough // upgrade to a sharper reading when closer
-            case .unknown, .failed:
+            case .resolved, .failed:
+                // Retry/upgrade only once the vehicle is meaningfully closer —
+                // retrying a failed read every frame floods the OCR queue,
+                // which delays detection passes and destabilises the tracker.
+                needsRead = grewEnough
+            case .unknown:
                 needsRead = true
             case .pending:
                 needsRead = false
@@ -157,6 +168,9 @@ final class TrackingEngine {
             guard needsRead else { continue }
 
             pendingOCR.insert(vehicle.id)
+            // Record the vehicle height this attempt was made at, so the next
+            // attempt requires real growth (applies to failures too).
+            lastOCRHeight[vehicle.id] = vehicle.boundingBox.height
             if case .unknown = vehicle.plateState {
                 tracker.setPlateState(.pending, for: vehicle.id)
             }

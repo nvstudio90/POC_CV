@@ -1,5 +1,7 @@
 import CoreGraphics
+import CoreVideo
 import Foundation
+import ImageIO
 
 /// Coordinate-system helpers bridging three spaces used across the pipeline:
 ///
@@ -11,6 +13,51 @@ import Foundation
 /// Keeping the conversions in one place avoids the classic "boxes are flipped /
 /// mirrored" bugs when data crosses between CoreML and Vision.
 enum VisionGeometry {
+    /// Derives the `CGImagePropertyOrientation` Vision/CoreML need from an
+    /// `AVAssetTrack.preferredTransform`. Only the rotation component matters
+    /// here (the translation term is a pixel-space offset that doesn't apply
+    /// to unrotated buffers), so only pure 0/90/180/270° rotations are
+    /// recognised; anything else falls back to `.up`.
+    static func orientation(fromPreferredTransform transform: CGAffineTransform) -> CGImagePropertyOrientation {
+        switch (transform.a, transform.b, transform.c, transform.d) {
+        case (0, 1, -1, 0):
+            return .right
+        case (0, -1, 1, 0):
+            return .left
+        case (-1, 0, 0, -1):
+            return .down
+        default:
+            return .up
+        }
+    }
+
+    /// A pure-rotation `CGAffineTransform` (no translation) suitable for
+    /// applying to a `CALayer` so an *unrotated* pixel buffer displays upright.
+    static func displayRotationTransform(for orientation: CGImagePropertyOrientation) -> CGAffineTransform {
+        switch orientation {
+        case .right:
+            return CGAffineTransform(rotationAngle: .pi / 2)
+        case .left:
+            return CGAffineTransform(rotationAngle: -.pi / 2)
+        case .down:
+            return CGAffineTransform(rotationAngle: .pi)
+        default:
+            return .identity
+        }
+    }
+
+    /// The pixel size of `pixelBuffer` *as it will be displayed* once
+    /// `orientation` is applied (width/height swap for the 90°/270° cases).
+    /// This is the same "image space" every other rect in the pipeline is
+    /// expressed in.
+    static func orientedImageSize(of pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) -> CGSize {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        return orientation.swapsWidthAndHeight
+            ? CGSize(width: height, height: width)
+            : CGSize(width: width, height: height)
+    }
+
     /// Image-space rect (top-left origin, pixels) → Vision normalised rect
     /// (bottom-left origin).
     static func normalizedRect(fromImageRect rect: CGRect, imageSize: CGSize) -> CGRect {
@@ -41,6 +88,19 @@ enum VisionGeometry {
         let unionArea = lhs.width * lhs.height + rhs.width * rhs.height - intersectionArea
         guard unionArea > 0 else { return 0 }
         return intersectionArea / unionArea
+    }
+}
+
+extension CGImagePropertyOrientation {
+    /// `true` for the 90°/270° rotations, where width and height swap between
+    /// the buffer's raw storage space and its oriented (display) space.
+    var swapsWidthAndHeight: Bool {
+        switch self {
+        case .left, .right, .leftMirrored, .rightMirrored:
+            return true
+        default:
+            return false
+        }
     }
 }
 
