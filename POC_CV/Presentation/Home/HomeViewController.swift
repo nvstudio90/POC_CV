@@ -88,7 +88,10 @@ final class VehicleOverlayView: UIView {
     }
 
     private func drawLabel(for item: VehicleOverlayItem, color: UIColor, in rect: CGRect) {
-        let labelText = item.plateText ?? String(format: "%.0f%%", item.confidence * 100)
+        guard let plateText = item.plateText else {
+            return
+        }
+        let labelText = PlateValidator.formatPlateForDisplay(plateText)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
             .foregroundColor: UIColor.black

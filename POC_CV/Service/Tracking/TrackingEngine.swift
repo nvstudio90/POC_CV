@@ -33,7 +33,7 @@ final class TrackingEngine {
         /// Re-read a plate once the vehicle has grown this much since last OCR.
         static let reocrGrowthFactor: CGFloat = 1.4
         /// Minimum spacing between vehicle-detection submissions (battery cap).
-        static let detectionMinInterval: CFTimeInterval = 1.0 / 20.0
+        static let detectionMinInterval: CFTimeInterval = 1.0 / 30.0
     }
 
     private let trackingQueue = DispatchQueue(label: "com.poccv.tracking.engine", qos: .userInitiated)
@@ -167,12 +167,18 @@ final class TrackingEngine {
     // MARK: - Overlay
 
     private func emitOverlay(for vehicles: [TrackedVehicle]) {
-        let items = vehicles.map { vehicle -> VehicleOverlayItem in
-            let plateText = plateStore.text(for: vehicle.id)
+        // Only surface vehicles whose license plate has actually been read.
+        let items = vehicles.compactMap { vehicle -> VehicleOverlayItem? in
+            guard let plateText = plateStore.text(for: vehicle.id), plateText.isEmpty == false else {
+                return nil
+            }
+            guard let pt = PlateValidator.cleanAndValidatePlate(rawText: plateText) else {
+                return nil
+            }
             return VehicleOverlayItem(
                 id: vehicle.id,
                 rect: vehicle.boundingBox,
-                plateText: plateText,
+                plateText: pt,
                 confidence: vehicle.confidence,
                 isPredicted: vehicle.framesSinceCorrection > 0
             )
